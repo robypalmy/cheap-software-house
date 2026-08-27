@@ -1,0 +1,17 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+logs/*.log
+!logs/.gitkeep
+
+lead_prospecting.xlsx
+storico_aziende.csv
+
+.DS_Store
+.idea/
+.vscode/
