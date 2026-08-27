@@ -66,7 +66,10 @@ MODELLO: str = "claude-sonnet-5"
 
 WEB_SEARCH_MAX_USES: int = 15
 
-MAX_TOKENS: int = 8000
+# Alzato a 16000 per accomodare risposte piu' lunghe con molti risultati:
+# con 8000 capitava di venire troncati (stop_reason="max_tokens") e perdere
+# righe. Il client rileva comunque il troncamento e fa retry.
+MAX_TOKENS: int = 16000
 
 API_MAX_RETRIES: int = 3
 API_BACKOFF_BASE_SECONDS: float = 4.0
@@ -78,6 +81,19 @@ API_BACKOFF_BASE_SECONDS: float = 4.0
 # successiva. Con N=2 si evita di dichiarare esaurita una coppia solo
 # per un run sfortunato (rate limit, risposta scarsa, ecc.).
 SATURATION_THRESHOLD: int = 2
+
+
+# Quante coppie (regione, settore) processare per ogni singolo run in
+# modalita' automatica. Con 21 regioni x 11 settori = 231 coppie e
+# SATURATION_THRESHOLD=2, processare piu' coppie per notte accelera la
+# copertura. Modalita' manuale (--regione/--settore) resta 1 coppia.
+COPPIE_PER_RUN: int = 3
+
+
+# Ritenzione log giornalieri in giorni. All'inizio di ogni run, i file
+# ``logs/*.log`` piu' vecchi di questa soglia vengono cancellati.
+# Impostare a 0 o negativo per disabilitare la pulizia.
+LOG_RETENTION_DAYS: int = 30
 
 
 STATI_LEAD: list[str] = [

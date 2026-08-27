@@ -16,7 +16,7 @@ L'invio email sara' un modulo separato che leggera' lo stesso file.
 ├── main.py                # entry point / orchestratore
 ├── config.py              # parametri (regioni, settori, path, modello…)
 ├── claude_client.py       # wrapper Anthropic + web_search + retry
-├── dedup.py               # deduplica contro storico (nome + dominio)
+├── dedup.py               # deduplica contro storico (nome + dominio + email + telefono)
 ├── excel_writer.py        # append + formattazione + data validation
 ├── requirements.txt
 ├── .env.example           # ANTHROPIC_API_KEY=
@@ -26,9 +26,14 @@ L'invio email sara' un modulo separato che leggera' lo stesso file.
 
 File generati a runtime:
 - `lead_prospecting.xlsx` — output principale (append giornaliero)
-- `storico_aziende.csv` — storico aziende gia' viste (per deduplica)
+- `storico_aziende.csv` — storico aziende gia' viste (per deduplica, schema
+  a 5 colonne: `nome_normalizzato`, `dominio`, `nome_originale`,
+  `email_normalizzata`, `telefono_normalizzato`)
+- `storico_aziende.csv.bak` — creato **una sola volta** al primo run che
+  migra un vecchio storico a 3 colonne verso il nuovo schema a 5
 - `.rotation_state.json` — indice corrente della rotazione regione/settore
-- `logs/YYYY-MM-DD.log` — log del giorno
+- `logs/YYYY-MM-DD.log` — log del giorno (auto-pulizia dopo
+  `LOG_RETENTION_DAYS`)
 
 ---
 
@@ -54,21 +59,31 @@ cp .env.example .env
 
 ## Test manuale (batch piccolo)
 
-Prima di metterlo in cron, verifica la qualita' dei risultati con un batch
-piccolo (5 aziende):
+Prima di metterlo in cron, verifica la qualita' dei risultati con questi
+comandi in ordine:
 
 ```bash
-python main.py --regione "Ticino" --settore "manifatturiero" --numero 5
+# 1. Run manuale su singola coppia (stato NON viene aggiornato)
+python main.py --regione "Ticino" --settore "ristorazione" --numero 5
+
+# 2. Modalita' automatica multi-coppia
+python main.py --coppie 2
+
+# 3. Rilancia: deve scartare i duplicati (anche via email/telefono
+#    se nome/dominio differissero leggermente)
+python main.py --coppie 2
 ```
 
-Controlla:
-1. `logs/YYYY-MM-DD.log` — deve terminare con `=== END run (OK) ===`.
-2. `lead_prospecting.xlsx` — deve avere le colonne corrette, l'header colorato,
-   e la lista a discesa nella colonna **Stato** (default `Da contattare`).
-3. `storico_aziende.csv` — deve contenere le righe appena scritte.
-
-Rilancia lo stesso comando: nel log dovresti vedere **duplicati scartati**
-e nessuna nuova riga aggiunta all'Excel (conferma che la deduplica funziona).
+Controlla nei log:
+1. Ogni coppia loggata separatamente: `--- Coppia 1/2: (Ticino, ...) ---`.
+2. `storico_aziende.csv` aggiornato **dopo ogni coppia** (non solo a fine run).
+3. Al secondo giro, i duplicati vengono scartati anche via **email/telefono**
+   normalizzati, oltre che via nome/dominio.
+4. Se `storico_aziende.csv` esisteva gia' con schema v1 (3 colonne), viene
+   creato `storico_aziende.csv.bak` e il file principale viene migrato a
+   5 colonne (email/telefono vuoti per le righe pre-esistenti).
+5. Il log del giorno termina con `=== END run (OK) ===` e una riga
+   `RIEPILOGO run: coppie ok=..., lead nuovi totali=..., ...`.
 
 ---
 
@@ -76,16 +91,18 @@ e nessuna nuova riga aggiunta all'Excel (conferma che la deduplica funziona).
 
 | Flag | Default | Descrizione |
 |---|---|---|
-| `--regione` | rotazione automatica su `config.REGIONI` | Zona da cercare |
-| `--settore` | rotazione automatica su `config.SETTORI` | Settore, o `qualsiasi` |
-| `--numero` | `18` (`NUMERO_AZIENDE_PER_RUN`) | Quante aziende per run |
+| `--regione` | rotazione automatica su `config.REGIONI` | Zona da cercare (override manuale) |
+| `--settore` | rotazione automatica su `config.SETTORI` | Settore, o `qualsiasi` (override manuale) |
+| `--numero` | `18` (`NUMERO_AZIENDE_PER_RUN`) | Quante aziende per **singola coppia** |
+| `--coppie` | `3` (`COPPIE_PER_RUN`) | Quante coppie processare per run in modalita' automatica. **Ignorato** se `--regione`/`--settore` sono passati (override manuale = 1 sola coppia). |
 | `--modello` | `claude-sonnet-5` | Modello Anthropic |
 | `--excel` | `lead_prospecting.xlsx` | Path Excel di output |
 | `--storico` | `storico_aziende.csv` | Path CSV storico |
 
 Senza flag lo script usa la **rotazione automatica intelligente** (vedi
-sotto): resta sulla stessa coppia `(regione, settore)` finche' produce
-nuovi lead, poi passa alla successiva.
+sotto): processa fino a `--coppie` coppie in sequenza, restando sulla
+stessa `(regione, settore)` finche' produce nuovi lead, poi passando alla
+successiva.
 
 Per personalizzare regioni/settori/numero di default, modifica `config.py`.
 
@@ -149,12 +166,25 @@ In `config.py`:
 - `SATURATION_THRESHOLD`: default `2` — quanti run consecutivi a zero servono
   per marcare esaurita una coppia. Alza a `3` se hai risposte API rumorose,
   abbassa a `1` per rotazione piu' aggressiva.
+- `COPPIE_PER_RUN`: default `3` — quante coppie processare in un singolo
+  run automatico. Con 21 regioni x 11 settori = 231 coppie, alzarlo
+  accelera la copertura ma allunga proporzionalmente durata e costi API.
+- `NUMERO_AZIENDE_PER_RUN`: default `18` — aziende chieste a Claude per
+  singola coppia.
+- `MAX_TOKENS`: default `16000`. Se le risposte vengono spesso troncate
+  (vedi warning `Risposta troncata per limite token` nei log), il client
+  fa gia' retry ma puoi alzare ulteriormente questo valore.
+- `LOG_RETENTION_DAYS`: default `30` — i log giornalieri piu' vecchi
+  vengono cancellati all'inizio di ogni run. Metti `0` per disabilitare.
 
 ### Override manuale
 
-Se lanci con `--regione` e/o `--settore` da CLI, **lo stato NON viene
-aggiornato**: e' un run "fuori rotazione" per test o per un focus mirato.
-Cosi' non sporchi la logica automatica quando fai esperimenti.
+Se lanci con `--regione` e/o `--settore` da CLI:
+
+- **Viene processata una singola coppia** (`--coppie` viene ignorato).
+- **Lo stato NON viene aggiornato**: e' un run "fuori rotazione" per test
+  o per un focus mirato. Cosi' non sporchi la logica automatica quando
+  fai esperimenti.
 
 ### Reset
 
@@ -184,7 +214,7 @@ Aggiungi una riga per lanciare lo script ogni notte alle 04:30
 (**usa path assoluti** — cron non conosce il tuo `$PATH`):
 
 ```cron
-30 4 * * * cd /Users/robypalmy/Desktop/cheap-software-house && /Users/robypalmy/Desktop/cheap-software-house/.venv/bin/python main.py >> logs/cron.log 2>&1
+30 4 * * * cd /Users/{nome-utente}/Desktop/cheap-software-house && /Users/{nome-utente}/Desktop/cheap-software-house/.venv/bin/python main.py >> logs/cron.log 2>&1
 ```
 
 Note:
@@ -241,26 +271,39 @@ e termina con exit code `3`. Chiudi Excel e rilancia manualmente.
 
 ## Come funziona in breve
 
-1. **Rotazione stay-until-exhausted**: sceglie una coppia `(regione, settore)`
-   dallo stato persistente e ci resta finche' produce nuovi lead (vedi
-   sezione sopra). Con `--regione`/`--settore` da CLI si fa override senza
-   toccare lo stato.
-2. **Chiamata API**: manda un prompt a Claude con il tool `web_search`
-   abilitato, chiedendo `N` PMI reali in quella zona con siti outdated.
-3. **Parsing**: estrae l'array JSON dalla risposta (tollerando code fence),
-   valida i campi obbligatori, scarta le righe malformate con warning nei log.
-4. **Retry**: max 3 tentativi con backoff esponenziale su errori di rete,
-   rate limit o JSON non parsabile.
-5. **Deduplica**: confronta contro `storico_aziende.csv` su nome normalizzato
-   (senza `S.r.l.`, `S.p.A.`, punteggiatura) e dominio del sito.
-6. **Excel**: append delle sole aziende nuove, con formattazione header e
-   data validation sulla colonna Stato.
-7. **Storico**: aggiorna `storico_aziende.csv` con le nuove righe.
-8. **Stato rotazione**: aggiorna `.rotation_state.json` — se ci sono nuovi
-   lead, resta sulla coppia corrente; se sono zero, incrementa lo streak
-   e, alla soglia, marca la coppia esaurita e avanza al prossimo settore
-   (o regione, se erano tutti fatti).
-9. **Log**: `logs/YYYY-MM-DD.log` con parametri usati, conteggi, errori.
+1. **Log housekeeping**: all'inizio di ogni run i file `logs/*.log` piu'
+   vecchi di `LOG_RETENTION_DAYS` vengono cancellati (fallback su mtime
+   se il nome file non e' parsabile).
+2. **Loop multi-coppia**: fino a `--coppie` iterazioni. Ogni iterazione:
+   - **Rotazione stay-until-exhausted**: sceglie una coppia
+     `(regione, settore)` dallo stato persistente e ci resta finche' produce
+     nuovi lead. Con `--regione`/`--settore` da CLI si fa override manuale
+     (singola coppia, stato non aggiornato).
+   - **Chiamata API**: manda un prompt a Claude con il tool `web_search`
+     abilitato, chiedendo `N` PMI reali in quella zona con siti outdated.
+     `MAX_TOKENS=16000`. Se la risposta e' troncata (`stop_reason=max_tokens`)
+     viene trattata come errore recuperabile e ritentata.
+   - **Parsing**: estrae l'array JSON dalla risposta (tollerando code fence),
+     valida i campi obbligatori, scarta righe malformate con warning nei log.
+   - **Retry**: max 3 tentativi con backoff esponenziale su errori di rete,
+     rate limit, JSON non parsabile o risposta troncata.
+   - **Deduplica**: confronta contro `storico_aziende.csv` con OR logico su
+     nome normalizzato (senza `S.r.l.`, `S.p.A.`, punteggiatura), dominio
+     del sito, **email normalizzata** ed **telefono normalizzato** (solo
+     cifre, prefissi IT/CH strippati).
+   - **Excel**: append delle sole aziende nuove.
+   - **Storico**: aggiornamento **incrementale dopo ogni coppia** — se il
+     run si interrompe, il lavoro gia' fatto non e' perso.
+   - **Stato rotazione**: se ci sono nuovi lead, resta sulla coppia
+     corrente; se sono zero, incrementa lo streak e, alla soglia,
+     marca la coppia esaurita e avanza.
+3. **Gestione errori per-coppia**: un `ClaudeAPIError` su una singola
+   coppia NON interrompe il run: si passa alla successiva. `ExcelLocked`
+   invece interrompe (nessuna coppia riuscirebbe a scrivere).
+4. **Riepilogo finale**: nel log del giorno una riga `RIEPILOGO run: ...`
+   con coppie riuscite/fallite, lead nuovi totali, duplicati totali, durata.
+   Exit code `0` se tutte le coppie sono andate, altrimenti il codice del
+   primo errore incontrato.
 
 ---
 
@@ -281,9 +324,18 @@ e termina con exit code `3`. Chiudi Excel e rilancia manualmente.
 - **`ANTHROPIC_API_KEY non impostata`** → controlla che `.env` esista nella
   root del progetto e contenga la chiave.
 - **`Tutti i 3 tentativi falliti`** → probabile rate limit o problema di rete.
-  Il file Excel non viene toccato. Riprova piu' tardi o abbassa `--numero`.
+  Il file Excel non viene toccato per quella coppia. In modalita' multi-coppia
+  si passa comunque alla successiva; a fine run l'exit code sara' `2`.
+- **`Risposta troncata per limite token`** → il modello ha esaurito
+  `MAX_TOKENS`. Il client fa gia' retry. Se persiste, alza `MAX_TOKENS` in
+  `config.py` o abbassa `--numero`.
 - **`Il file Excel ... sembra aperto`** → chiudi il file in Excel/Numbers e
-  rilancia.
+  rilancia. Exit code `3`. In modalita' multi-coppia il run si interrompe
+  perche' le coppie successive non riuscirebbero a scrivere comunque.
+- **`Storico v1 rilevato: backup creato in ...`** → e' informativo, non e'
+  un errore: la prima volta che giri la nuova versione, il vecchio
+  `storico_aziende.csv` a 3 colonne viene salvato come `.bak` e migrato
+  a 5 colonne (email/telefono vuoti per le righe pre-esistenti).
 - **Cron non parte** → verifica che il path sia assoluto, che il `.venv`
   esista, e che su macOS `cron` abbia *Full Disk Access*.
 - **Risultati di bassa qualita'** → prova ad abbassare `--numero` (batch piu'

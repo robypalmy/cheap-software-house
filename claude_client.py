@@ -229,8 +229,24 @@ def search_companies(
                 ],
                 messages=[{"role": "user", "content": prompt}],
             )
+
+            stop_reason = getattr(response, "stop_reason", None)
+            if stop_reason == "max_tokens":
+                # Rispondere con un JSON troncato produce parsing spurio o silent data loss:
+                # meglio trattarlo come errore recuperabile e ritentare (stesso backoff).
+                logger.warning(
+                    "Risposta troncata per limite token (stop_reason=max_tokens, "
+                    "MAX_TOKENS=%d), retry",
+                    MAX_TOKENS,
+                )
+                raise ValueError("Risposta troncata: stop_reason=max_tokens")
+
             raw_text = _extract_text_blocks(response)
-            logger.debug("Risposta grezza Claude (len=%d)", len(raw_text))
+            logger.debug(
+                "Risposta grezza Claude (len=%d, stop_reason=%s)",
+                len(raw_text),
+                stop_reason,
+            )
             data = _extract_json_array(raw_text)
 
             rows: list[dict[str, Any]] = []
